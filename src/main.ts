@@ -240,6 +240,19 @@ export default class ReferenceList extends Plugin {
                 }
               }
 
+              if (this.settings.pullFromZotero) {
+                // Keep the currently rendered bibliography available while a
+                // fresh Zotero snapshot is downloaded. Clearing bibCache here
+                // makes all citations temporarily appear unresolved.
+                this.setStatusBarLoading();
+                try {
+                  await this.bibManager.refreshGlobalZBib();
+                } finally {
+                  this.setStatusBarIdle();
+                }
+                return;
+              }
+
               this.bibManager.reinit(true);
               await this.bibManager.initPromise.promise;
               this.processReferences();
