@@ -24,6 +24,7 @@ export const DEFAULT_SETTINGS: ReferenceListSettings = {
   renderCitations: true,
   renderCitationsReadingMode: true,
   renderLinkCitations: true,
+  zoteroRefreshMinutes: 15,
 };
 
 export interface ZoteroGroup {
@@ -50,6 +51,7 @@ export interface ReferenceListSettings {
 
   pullFromZotero?: boolean;
   zoteroPort?: string;
+  zoteroRefreshMinutes: number;
   zoteroGroups: ZoteroGroup[];
 }
 

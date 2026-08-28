@@ -196,7 +196,11 @@ export class CiteSuggest extends EditorSuggest<
     if (!match) return null;
     this.lastSelect = null;
 
-    if (!this.context && pullFromZotero) {
+    if (
+      !this.context &&
+      pullFromZotero &&
+      this.plugin.bibManager.isGlobalZBibRefreshDue()
+    ) {
       this.refreshZBib();
     }
 

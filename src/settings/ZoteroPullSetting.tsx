@@ -110,6 +110,26 @@ export function ZoteroPullSetting({ plugin }: { plugin: ReferenceList }) {
               />
             </SettingItem>
           </div>
+          <div className="pwc-setting-item setting-item">
+            <SettingItem
+              name="Background refresh interval"
+              description="Refresh the cached Zotero bibliography in the background. Set to 0 to disable periodic refresh."
+            >
+              <input
+                onChange={(e) => {
+                  const value = Number(e.target.value);
+                  plugin.settings.zoteroRefreshMinutes = Number.isFinite(value)
+                    ? Math.max(0, Math.floor(value))
+                    : 15;
+                  plugin.saveSettings();
+                }}
+                type="number"
+                min="0"
+                step="1"
+                defaultValue={plugin.settings.zoteroRefreshMinutes ?? 15}
+              />
+            </SettingItem>
+          </div>
           <div className="setting-item pwc-setting-item-wrapper">
             <SettingItem name={t('Libraries to include in bibliography')} />
             {possibleGroups.map((g) => {

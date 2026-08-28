@@ -7,6 +7,7 @@ import { request } from 'http';
 import { CSLList, PartialCSLEntry } from './types';
 
 export const DEFAULT_ZOTERO_PORT = '23119';
+const ZOTERO_PROBE_TIMEOUT_MS = 1000;
 
 function ensureDir(dir: string) {
   if (!fs.existsSync(dir)) {
@@ -304,91 +305,117 @@ function applyGroupID(list: CSLList, groupId: number) {
   });
 }
 
+export interface ZBibResult {
+  list: CSLList;
+  loadedFromCache: boolean;
+  cacheTimestamp: number;
+}
+
+function readCachedZBib(cached: string, groupId: number): ZBibResult | null {
+  if (!fs.existsSync(cached)) return null;
+
+  try {
+    const list = JSON.parse(fs.readFileSync(cached).toString()) as CSLList;
+    return {
+      list: applyGroupID(list, groupId),
+      loadedFromCache: true,
+      cacheTimestamp: fs.statSync(cached).mtimeMs,
+    };
+  } catch (e) {
+    console.warn(`Unable to read cached Zotero bibliography '${cached}'`, e);
+    return null;
+  }
+}
+
+function writeCachedZBib(
+  cached: string,
+  contents: string,
+  groupId: number
+): ZBibResult {
+  const list = JSON.parse(contents) as CSLList;
+  if (!Array.isArray(list)) {
+    throw new Error('Zotero bibliography export did not return a CSL-JSON array.');
+  }
+
+  // Never expose a partially written cache to Obsidian. This also leaves the
+  // previous working cache untouched when parsing or downloading fails.
+  const temporary = `${cached}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    fs.writeFileSync(temporary, contents);
+    fs.renameSync(temporary, cached);
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+  }
+
+  return {
+    list: applyGroupID(list, groupId),
+    loadedFromCache: false,
+    cacheTimestamp: fs.statSync(cached).mtimeMs,
+  };
+}
+
+async function downloadZBib(port: string, groupId: number): Promise<string> {
+  // Better BibTeX 9 no longer resolves the legacy `/export/library?/1/...`
+  // form for the user library. Its generic pull-export route accepts Zotero's
+  // internal library ID and works for both personal and group libraries.
+  const urls = [
+    `http://127.0.0.1:${port}/better-bibtex/export?/library;id:${groupId}/library.json`,
+    `http://127.0.0.1:${port}/better-bibtex/export/library?/${groupId}/library.json`,
+  ];
+
+  let lastError: unknown;
+  for (const url of urls) {
+    try {
+      return (await download(url)).toString();
+    } catch (e) {
+      lastError = e;
+    }
+  }
+
+  throw lastError;
+}
+
 export async function getZBib(
   port: string = DEFAULT_ZOTERO_PORT,
   cacheDir: string,
   groupId: number,
   loadCached?: boolean
-) {
-  const isRunning = await isZoteroRunning(port);
+): Promise<ZBibResult | null> {
   const cached = path.join(cacheDir, `zotero-library-${groupId}.json`);
 
   ensureDir(cacheDir);
-  if (loadCached || !isRunning) {
-    if (fs.existsSync(cached)) {
-      return applyGroupID(
-        JSON.parse(fs.readFileSync(cached).toString()) as CSLList,
-        groupId
-      );
-    }
-    if (!isRunning) {
-      return null;
-    }
+
+  // Cache-first: do not wait for a Zotero probe when a usable bibliography is
+  // already available. A background refresh will update it after startup.
+  if (loadCached) {
+    const cachedResult = readCachedZBib(cached, groupId);
+    if (cachedResult) return cachedResult;
   }
 
-  const bib = await download(
-    `http://127.0.0.1:${port}/better-bibtex/export/library?/${groupId}/library.json`
-  );
+  const isRunning = await isZoteroRunning(port);
+  if (!isRunning) {
+    return readCachedZBib(cached, groupId);
+  }
 
-  const str = bib.toString();
-
-  fs.writeFileSync(cached, str);
-
-  return applyGroupID(JSON.parse(str) as CSLList, groupId);
+  return writeCachedZBib(cached, await downloadZBib(port, groupId), groupId);
 }
 
 export async function refreshZBib(
   port: string = DEFAULT_ZOTERO_PORT,
   cacheDir: string,
-  groupId: number,
-  since: number
-) {
+  groupId: number
+): Promise<ZBibResult | null> {
   if (!(await isZoteroRunning(port))) {
     return null;
   }
 
   const cached = path.join(cacheDir, `zotero-library-${groupId}.json`);
   ensureDir(cacheDir);
-  if (!fs.existsSync(cached)) {
-    return null;
-  }
 
-  const mList = (await getZModified(port, groupId, since)) as CSLList;
-
-  if (!mList?.length) {
-    return null;
-  }
-
-  const modified: Map<string, PartialCSLEntry> = new Map();
-  const newKeys: Set<string> = new Set();
-
-  for (const mod of mList) {
-    mod.id = (mod as any).citekey || (mod as any)['citation-key'];
-    if (!mod.id) continue;
-    modified.set(mod.id, mod);
-    newKeys.add(mod.id);
-  }
-
-  const list = JSON.parse(fs.readFileSync(cached).toString()) as CSLList;
-
-  for (let i = 0; i < list.length; i++) {
-    const item = list[i];
-    if (modified.has(item.id)) {
-      newKeys.delete(item.id);
-      list[i] = modified.get(item.id);
-    }
-  }
-
-  for (const key of newKeys) {
-    list.push(modified.get(key));
-  }
-
-  fs.writeFileSync(cached, JSON.stringify(list));
-
-  return {
-    list: applyGroupID(list, groupId),
-    modified,
-  };
+  // A complete background export is more reliable than BBT's item.search
+  // incremental path: current Zotero libraries may include annotation items,
+  // which can make that RPC fail. Full replacement also handles deletions.
+  return writeCachedZBib(cached, await downloadZBib(port, groupId), groupId);
 }
 
 export async function isZoteroRunning(port: string = DEFAULT_ZOTERO_PORT) {
@@ -399,7 +426,7 @@ export async function isZoteroRunning(port: string = DEFAULT_ZOTERO_PORT) {
       getGlobal().setTimeout(() => {
         res(null);
         p.destroy();
-      }, 150);
+      }, ZOTERO_PROBE_TIMEOUT_MS);
     }),
   ]);
 

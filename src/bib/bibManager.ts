@@ -148,6 +148,8 @@ export class BibManager {
   zCitekeyToPDFLinks: Map<string, string[]> = new Map();
 
   watcherCache: Map<string, FSWatcher> = new Map();
+  refreshPromise: Promise<void> | null = null;
+  lastRefreshStartedAt = 0;
 
   constructor(plugin: ReferenceList) {
     this.plugin = plugin;
@@ -367,7 +369,11 @@ export class BibManager {
 
   async loadAndRefreshGlobalZBib() {
     await this.loadGlobalZBib(true);
-    await this.refreshGlobalZBib();
+    // The cached bibliography is enough to render immediately. Refresh Zotero
+    // in the background so startup and citekey completion are not blocked.
+    void this.refreshGlobalZBib().catch((e) => {
+      console.error('Error refreshing bibliography from Zotero', e);
+    });
   }
 
   async loadGlobalZBib(fromCache?: boolean) {
@@ -377,15 +383,19 @@ export class BibManager {
     const bib: PartialCSLEntry[] = [];
     for (const group of settings.zoteroGroups) {
       try {
-        const list = await getZBib(
+        const result = await getZBib(
           settings.zoteroPort,
           cacheDir,
           group.id,
           fromCache
         );
+        const list = result?.list;
+        // The cache file timestamp represents the newest state actually
+        // stored on disk. Using Date.now() here can skip items added after
+        // the cache was written but before this startup.
+        if (result) group.lastUpdate = result.cacheTimestamp;
         if (list?.length) {
           bib.push(...list);
-          group.lastUpdate = Date.now();
         }
       } catch (e) {
         console.error('Error fetching bibliography from Zotero', e);
@@ -427,39 +437,49 @@ export class BibManager {
     }
   }
 
-  async refreshGlobalZBib() {
+  refreshGlobalZBib(): Promise<void> {
+    if (this.refreshPromise) return this.refreshPromise;
+
+    this.lastRefreshStartedAt = Date.now();
+    this.refreshPromise = this.performGlobalZBibRefresh().finally(() => {
+      this.refreshPromise = null;
+    });
+    return this.refreshPromise;
+  }
+
+  isGlobalZBibRefreshDue(): boolean {
+    const minutes = this.plugin.settings.zoteroRefreshMinutes ?? 15;
+    if (minutes <= 0) return false;
+    return Date.now() - this.lastRefreshStartedAt >= minutes * 60 * 1000;
+  }
+
+  private async performGlobalZBibRefresh(): Promise<void> {
     const { settings, cacheDir } = this.plugin;
     if (!settings.zoteroGroups?.length) return;
 
-    const bib: PartialCSLEntry[] = [];
-    const modifiedEntries: Map<string, PartialCSLEntry> = new Map();
+    let refreshed = false;
 
     for (const group of settings.zoteroGroups) {
       try {
         const res = await refreshZBib(
           settings.zoteroPort,
           cacheDir,
-          group.id,
-          group.lastUpdate
+          group.id
         );
         if (!res) continue;
-        if (res.list?.length) {
-          bib.push(...res.list);
-          group.lastUpdate = Date.now();
-        }
-
-        for (const [k, v] of res.modified.entries()) {
-          modifiedEntries.set(k, v);
-          this.bibCache.set(k, v);
-        }
+        group.lastUpdate = res.cacheTimestamp;
+        refreshed = true;
       } catch (e) {
         console.error('Error fetching bibliography from Zotero', e);
         continue;
       }
     }
 
-    this.plugin.saveSettings();
-    this.updateFuse(modifiedEntries);
+    if (!refreshed) return;
+
+    // Rebuild from the complete on-disk snapshots. This adds new records,
+    // updates changed records, and removes records deleted from Zotero.
+    await this.loadGlobalZBib(true);
     this.fileCache.clear();
     this.plugin.processReferences();
   }

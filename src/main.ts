@@ -96,6 +96,17 @@ export default class ReferenceList extends Plugin {
       this.app.workspace.trigger('parse-style-settings');
     });
 
+    const refreshMinutes = this.settings.zoteroRefreshMinutes ?? 15;
+    if (this.settings.pullFromZotero && refreshMinutes > 0) {
+      this.registerInterval(
+        window.setInterval(() => {
+          void this.bibManager.refreshGlobalZBib().catch((e) => {
+            console.error('Background Zotero bibliography refresh failed', e);
+          });
+        }, refreshMinutes * 60 * 1000)
+      );
+    }
+
     this.addCommand({
       id: 'focus-reference-list-view',
       name: t('Show reference list'),
